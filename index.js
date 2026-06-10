@@ -125,11 +125,23 @@ async function applyPunishment(member, guild, punishment, reason, moderator = nu
   }
 }
 
+// ─── Status helper ───────────────────────────────────────────────────
+function updateStatus() {
+  const count = client.guilds.cache.size;
+  client.user.setActivity(`🛡 Protecting ${count} server${count !== 1 ? 's' : ''}`, { type: 3 });
+}
+
 // ─── Ready ──────────────────────────────────────────────────────────
 client.once('ready', () => {
   console.log(`✅ Racoot Security is online as ${client.user.tag}`);
-  client.user.setActivity('🛡 Protecting servers', { type: 3 });
+  updateStatus();
+  // Refresh status every 5 minutes in case cache drifts
+  setInterval(updateStatus, 5 * 60 * 1000);
 });
+
+// Update status whenever the bot joins or leaves a server
+client.on('guildCreate', () => updateStatus());
+client.on('guildDelete', () => updateStatus());
 
 // ─── Anti-Spam + Anti-Vanity + Auto-Mod ─────────────────────────────
 client.on('messageCreate', async (message) => {
@@ -425,6 +437,283 @@ client.on('interactionCreate', async (interaction) => {
       )
       .setTimestamp();
     interaction.reply({ embeds: [embed], ephemeral: true });
+
+  // ── /slowmode ──────────────────────────────────────────────────────
+  } else if (commandName === 'slowmode') {
+    const seconds = options.getInteger('seconds');
+    if (seconds < 0 || seconds > 21600)
+      return interaction.reply({ content: '❌ Slowmode must be between 0 and 21600 seconds.', ephemeral: true });
+    await interaction.channel.setRateLimitPerUser(seconds, `Set by ${member.user.tag}`);
+    await sendModLog(guild, { action: 'Slowmode', user: member.user, moderator: member.user, reason: `Set to ${seconds}s` });
+    interaction.reply({ content: seconds === 0 ? '✅ Slowmode disabled.' : `✅ Slowmode set to **${seconds}s**.` });
+
+  // ── /lock ──────────────────────────────────────────────────────────
+  } else if (commandName === 'lock') {
+    const target  = options.getChannel('channel') || interaction.channel;
+    const reason  = options.getString('reason') || 'No reason';
+    await target.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false }, { reason: `Lock by ${member.user.tag}: ${reason}` });
+    await sendModLog(guild, { action: 'Lock', user: member.user, moderator: member.user, reason: `${target.name} — ${reason}` });
+    interaction.reply({ content: `🔒 ${target} has been locked. Reason: ${reason}` });
+
+  // ── /unlock ────────────────────────────────────────────────────────
+  } else if (commandName === 'unlock') {
+    const target  = options.getChannel('channel') || interaction.channel;
+    const reason  = options.getString('reason') || 'No reason';
+    await target.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: null }, { reason: `Unlock by ${member.user.tag}: ${reason}` });
+    await sendModLog(guild, { action: 'Unlock', user: member.user, moderator: member.user, reason: `${target.name} — ${reason}` });
+    interaction.reply({ content: `🔓 ${target} has been unlocked. Reason: ${reason}` });
+
+  // ── /clear ─────────────────────────────────────────────────────────
+  } else if (commandName === 'clear') {
+    const amount = options.getInteger('amount');
+    if (amount < 1 || amount > 100)
+      return interaction.reply({ content: '❌ Amount must be between 1 and 100.', ephemeral: true });
+    const deleted = await interaction.channel.bulkDelete(amount, true).catch(() => null);
+    if (!deleted) return interaction.reply({ content: '❌ Could not delete messages (they may be older than 14 days).', ephemeral: true });
+    await sendModLog(guild, { action: 'Clear', user: member.user, moderator: member.user, reason: `Deleted ${deleted.size} messages in #${interaction.channel.name}` });
+    interaction.reply({ content: `🗑️ Deleted **${deleted.size}** message(s).`, ephemeral: true });
+
+  // ── /purge ─────────────────────────────────────────────────────────
+  } else if (commandName === 'purge') {
+    const target = options.getMember('user');
+    const amount = options.getInteger('amount') || 50;
+    const fetched = await interaction.channel.messages.fetch({ limit: Math.min(amount, 100) });
+    const toDelete = fetched.filter(m => m.author.id === target.id).first(100);
+    const deleted  = await interaction.channel.bulkDelete(toDelete, true).catch(() => null);
+    if (!deleted) return interaction.reply({ content: '❌ Could not delete messages.', ephemeral: true });
+    await sendModLog(guild, { action: 'Purge', user: target.user, moderator: member.user, reason: `Deleted ${deleted.size} messages from ${target.user.tag}` });
+    interaction.reply({ content: `🗑️ Deleted **${deleted.size}** message(s) from ${target.user.tag}.`, ephemeral: true });
+
+  // ── /nickname ──────────────────────────────────────────────────────
+  } else if (commandName === 'nickname') {
+    const target   = options.getMember('user');
+    const nickname = options.getString('nickname') || null;
+    await target.setNickname(nickname, `Changed by ${member.user.tag}`);
+    await sendModLog(guild, { action: 'Nickname', user: target.user, moderator: member.user, reason: nickname ? `Set to: ${nickname}` : 'Reset to default' });
+    interaction.reply({ content: nickname ? `✏️ Nickname for ${target.user.tag} set to **${nickname}**.` : `✏️ Nickname for ${target.user.tag} has been reset.` });
+
+  // ── /role ──────────────────────────────────────────────────────────
+  } else if (commandName === 'role') {
+    const action = options.getString('action');
+    const target = options.getMember('user');
+    const role   = options.getRole('role');
+    if (action === 'add') {
+      await target.roles.add(role, `Added by ${member.user.tag}`);
+      await sendModLog(guild, { action: 'Role Add', user: target.user, moderator: member.user, reason: `Added role: ${role.name}` });
+      interaction.reply({ content: `✅ Added **${role.name}** to ${target.user.tag}.` });
+    } else {
+      await target.roles.remove(role, `Removed by ${member.user.tag}`);
+      await sendModLog(guild, { action: 'Role Remove', user: target.user, moderator: member.user, reason: `Removed role: ${role.name}` });
+      interaction.reply({ content: `✅ Removed **${role.name}** from ${target.user.tag}.` });
+    }
+
+  // ── /unban ─────────────────────────────────────────────────────────
+  } else if (commandName === 'unban') {
+    const userId = options.getString('userid');
+    const reason = options.getString('reason') || 'No reason';
+    await guild.members.unban(userId, reason).catch(() => {
+      return interaction.reply({ content: `❌ Could not unban \`${userId}\`. Make sure the ID is correct.`, ephemeral: true });
+    });
+    if (!interaction.replied) {
+      const unbanned = await client.users.fetch(userId).catch(() => ({ tag: userId }));
+      await sendModLog(guild, { action: 'Unban', user: unbanned, moderator: member.user, reason });
+      interaction.reply({ content: `✅ Unbanned \`${userId}\`. Reason: ${reason}` });
+    }
+
+  // ── /softban ───────────────────────────────────────────────────────
+  } else if (commandName === 'softban') {
+    const target = options.getMember('user');
+    const reason = options.getString('reason') || 'No reason';
+    await target.ban({ deleteMessageSeconds: 7 * 24 * 60 * 60, reason: `Softban by ${member.user.tag}: ${reason}` });
+    await guild.members.unban(target.id, 'Softban — immediate unban');
+    await sendModLog(guild, { action: 'Softban', user: target.user, moderator: member.user, reason });
+    interaction.reply({ content: `🔨 ${target.user.tag} has been softbanned (messages cleared). Reason: ${reason}` });
+
+  // ── /tempban ───────────────────────────────────────────────────────
+  } else if (commandName === 'tempban') {
+    const target  = options.getMember('user');
+    const minutes = options.getInteger('minutes');
+    const reason  = options.getString('reason') || 'No reason';
+    await target.ban({ reason: `Tempban (${minutes}m) by ${member.user.tag}: ${reason}` });
+    await sendModLog(guild, { action: `Tempban (${minutes}m)`, user: target.user, moderator: member.user, reason });
+    interaction.reply({ content: `🔨 ${target.user.tag} has been banned for **${minutes} minute(s)**. Reason: ${reason}` });
+    setTimeout(async () => {
+      await guild.members.unban(target.id, 'Tempban expired').catch(() => {});
+    }, minutes * 60 * 1000);
+
+  // ── /tempmute ──────────────────────────────────────────────────────
+  } else if (commandName === 'tempmute') {
+    const target  = options.getMember('user');
+    const minutes = options.getInteger('minutes');
+    const reason  = options.getString('reason') || 'No reason';
+    await target.timeout(minutes * 60 * 1000, `Tempmute by ${member.user.tag}: ${reason}`);
+    await sendModLog(guild, { action: `Tempmute (${minutes}m)`, user: target.user, moderator: member.user, reason });
+    interaction.reply({ content: `🔇 ${target.user.tag} has been muted for **${minutes} minute(s)**. Reason: ${reason}` });
+
+  // ── /unmute ────────────────────────────────────────────────────────
+  } else if (commandName === 'unmute') {
+    const target = options.getMember('user');
+    const reason = options.getString('reason') || 'No reason';
+    await target.timeout(null, `Unmuted by ${member.user.tag}: ${reason}`);
+    await sendModLog(guild, { action: 'Unmute', user: target.user, moderator: member.user, reason });
+    interaction.reply({ content: `🔊 ${target.user.tag} has been unmuted. Reason: ${reason}` });
+
+  // ── /warn-list ─────────────────────────────────────────────────────
+  } else if (commandName === 'warn-list') {
+    const target = options.getMember('user');
+    const key    = `${guild.id}:${target.id}`;
+    const warns  = warnMap.get(key) || 0;
+    const embed  = new EmbedBuilder()
+      .setColor(0xffa500)
+      .setTitle(`⚠️ Warnings — ${target.user.tag}`)
+      .setDescription(`This user has **${warns}** active warning(s).`)
+      .setTimestamp();
+    interaction.reply({ embeds: [embed], ephemeral: true });
+
+  // ── /clear-warns ───────────────────────────────────────────────────
+  } else if (commandName === 'clear-warns') {
+    const target = options.getMember('user');
+    const reason = options.getString('reason') || 'No reason';
+    const key    = `${guild.id}:${target.id}`;
+    warnMap.delete(key);
+    await sendModLog(guild, { action: 'Clear Warns', user: target.user, moderator: member.user, reason });
+    interaction.reply({ content: `✅ Warnings cleared for ${target.user.tag}. Reason: ${reason}` });
+
+  // ── /modlog ────────────────────────────────────────────────────────
+  } else if (commandName === 'modlog') {
+    const target = options.getMember('user');
+    const key    = `${guild.id}:${target.id}`;
+    const warns  = warnMap.get(key) || 0;
+    const embed  = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`📋 Mod Log — ${target.user.tag}`)
+      .addFields(
+        { name: 'Active Warnings', value: `${warns}`, inline: true },
+        { name: 'Note', value: 'Full persistent log requires a database integration.', inline: false },
+      )
+      .setTimestamp();
+    interaction.reply({ embeds: [embed], ephemeral: true });
+
+  // ── /reason ────────────────────────────────────────────────────────
+  } else if (commandName === 'reason') {
+    const target = options.getMember('user');
+    const reason = options.getString('reason');
+    await sendModLog(guild, { action: 'Reason Update', user: target.user, moderator: member.user, reason });
+    interaction.reply({ content: `✅ Reason updated for ${target.user.tag}: ${reason}` });
+
+  // ── /appeal ────────────────────────────────────────────────────────
+  } else if (commandName === 'appeal') {
+    const reason = options.getString('reason');
+    const cfg    = getServerConfig(guild.id);
+    const logChannel = cfg.logChannelId ? guild.channels.cache.get(cfg.logChannelId) : null;
+    const embed = new EmbedBuilder()
+      .setColor(0x00bfff)
+      .setTitle('📩 Ban/Mute Appeal')
+      .addFields(
+        { name: 'User',   value: `${member.user.tag} (${member.id})`, inline: true },
+        { name: 'Reason', value: reason,                               inline: false },
+      )
+      .setTimestamp();
+    if (logChannel) {
+      await logChannel.send({ embeds: [embed] }).catch(() => {});
+      interaction.reply({ content: '✅ Your appeal has been submitted to the moderation team.', ephemeral: true });
+    } else {
+      interaction.reply({ content: '❌ No log channel is configured. Ask an admin to run `/setlogs` first.', ephemeral: true });
+    }
+
+  // ── /antiraid ──────────────────────────────────────────────────────
+  } else if (commandName === 'antiraid') {
+    const enabled = options.getString('enabled') === 'true';
+    setServerConfig(guild.id, { antiRaidEnabled: enabled });
+    interaction.reply({ content: `✅ Anti-raid protection is now **${enabled ? 'enabled' : 'disabled'}**.`, ephemeral: true });
+
+  // ── /antispam ──────────────────────────────────────────────────────
+  } else if (commandName === 'antispam') {
+    const enabled = options.getString('enabled') === 'true';
+    setServerConfig(guild.id, { antiSpamEnabled: enabled });
+    interaction.reply({ content: `✅ Anti-spam protection is now **${enabled ? 'enabled' : 'disabled'}**.`, ephemeral: true });
+
+  // ── /autorole ──────────────────────────────────────────────────────
+  } else if (commandName === 'autorole') {
+    const role = options.getRole('role');
+    setServerConfig(guild.id, { autoRoleId: role ? role.id : null });
+    interaction.reply({ content: role ? `✅ Auto-role set to **${role.name}**.` : '✅ Auto-role disabled.', ephemeral: true });
+
+  // ── /welcome ───────────────────────────────────────────────────────
+  } else if (commandName === 'welcome') {
+    const channel = options.getChannel('channel');
+    const message = options.getString('message') || 'Welcome to **{server}**, {user}! 🎉';
+    setServerConfig(guild.id, { welcomeChannelId: channel.id, welcomeMessage: message });
+    interaction.reply({ content: `✅ Welcome messages will be sent to ${channel}.\nMessage: \`${message}\``, ephemeral: true });
+
+  // ── /goodbye ───────────────────────────────────────────────────────
+  } else if (commandName === 'goodbye') {
+    const channel = options.getChannel('channel');
+    const message = options.getString('message') || '**{user}** has left **{server}**. Goodbye! 👋';
+    setServerConfig(guild.id, { goodbyeChannelId: channel.id, goodbyeMessage: message });
+    interaction.reply({ content: `✅ Goodbye messages will be sent to ${channel}.\nMessage: \`${message}\``, ephemeral: true });
+
+  // ── /prefix ────────────────────────────────────────────────────────
+  } else if (commandName === 'prefix') {
+    const prefix = options.getString('prefix');
+    if (prefix.length > 5)
+      return interaction.reply({ content: '❌ Prefix must be 5 characters or fewer.', ephemeral: true });
+    setServerConfig(guild.id, { prefix });
+    interaction.reply({ content: `✅ Custom prefix set to \`${prefix}\`.`, ephemeral: true });
+
+  // ── /language ──────────────────────────────────────────────────────
+  } else if (commandName === 'language') {
+    const lang = options.getString('lang');
+    setServerConfig(guild.id, { language: lang });
+    interaction.reply({ content: `✅ Bot language set to **${lang}**.`, ephemeral: true });
+
+  // ── /timezone ──────────────────────────────────────────────────────
+  } else if (commandName === 'timezone') {
+    const timezone = options.getString('timezone');
+    // Basic validation — Intl will throw if the timezone is invalid
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    } catch {
+      return interaction.reply({ content: `❌ \`${timezone}\` is not a valid timezone. Use a format like \`America/New_York\` or \`Europe/London\`.`, ephemeral: true });
+    }
+    setServerConfig(guild.id, { timezone });
+    interaction.reply({ content: `✅ Server timezone set to **${timezone}**.`, ephemeral: true });
+  }
+});
+
+// ─── Welcome / Goodbye / Auto-role on member join ────────────────────
+client.on('guildMemberAdd', async (member) => {
+  const cfg = getServerConfig(member.guild.id);
+
+  // Auto-role
+  if (cfg.autoRoleId) {
+    const role = member.guild.roles.cache.get(cfg.autoRoleId);
+    if (role) await member.roles.add(role, 'Auto-role on join').catch(() => {});
+  }
+
+  // Welcome message
+  if (cfg.welcomeChannelId) {
+    const channel = member.guild.channels.cache.get(cfg.welcomeChannelId);
+    if (channel) {
+      const text = (cfg.welcomeMessage || 'Welcome to **{server}**, {user}! 🎉')
+        .replace('{user}',   member.user.tag)
+        .replace('{server}', member.guild.name);
+      channel.send(text).catch(() => {});
+    }
+  }
+});
+
+// ─── Goodbye message on member leave ────────────────────────────────
+client.on('guildMemberRemove', async (member) => {
+  const cfg = getServerConfig(member.guild.id);
+  if (cfg.goodbyeChannelId) {
+    const channel = member.guild.channels.cache.get(cfg.goodbyeChannelId);
+    if (channel) {
+      const text = (cfg.goodbyeMessage || '**{user}** has left **{server}**. Goodbye! 👋')
+        .replace('{user}',   member.user.tag)
+        .replace('{server}', member.guild.name);
+      channel.send(text).catch(() => {});
+    }
   }
 });
 

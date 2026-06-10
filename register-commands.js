@@ -30,7 +30,46 @@ const commands = [
       { name: 'minutes', description: 'Duration in minutes', type: 4 }
     ]
   },
-  { name: 'stats', description: 'Show bot and server stats' }
+  { name: 'stats', description: 'Show bot and server stats' },
+  {
+    name: 'setlogs',
+    description: 'Set the moderation log channel for this server',
+    options: [
+      { name: 'channel', description: 'Channel to send mod logs to', type: 7 /* CHANNEL */, required: true }
+    ]
+  },
+  {
+    name: 'setpunishment',
+    description: 'Configure the punishment for an auto-protection system',
+    options: [
+      {
+        name: 'system',
+        description: 'Which system to configure',
+        type: 3 /* STRING */,
+        required: true,
+        choices: [
+          { name: 'Anti-Nuke',   value: 'antinuke'   },
+          { name: 'Anti-Spam',   value: 'antispam'   },
+          { name: 'Anti-Vanity', value: 'antivanity' },
+        ]
+      },
+      {
+        name: 'punishment',
+        description: 'Punishment to apply',
+        type: 3 /* STRING */,
+        required: true,
+        choices: [
+          { name: 'Warn', value: 'warn' },
+          { name: 'Kick', value: 'kick' },
+          { name: 'Ban',  value: 'ban'  },
+        ]
+      }
+    ]
+  },
+  {
+    name: 'getconfig',
+    description: 'Show the current security configuration for this server',
+  },
 ];
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);

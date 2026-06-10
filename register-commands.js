@@ -72,7 +72,15 @@ const commands = [
   },
 ];
 
+const CLIENT_ID = '742118218402889839';
+const GUILD_ID = process.env.GUILD_ID;
+
+if (!GUILD_ID) {
+  console.error('❌ GUILD_ID environment variable is not set.');
+  process.exit(1);
+}
+
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-rest.put(Routes.applicationCommands('742118218402889839'), { body: commands })
-  .then(() => console.log('✅ Slash commands registered!'))
+rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands })
+  .then(() => console.log(`✅ Slash commands registered to guild ${GUILD_ID}!`))
   .catch(console.error);

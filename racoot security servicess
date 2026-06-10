@@ -1,0 +1,223 @@
+package.json
+
+{
+  "name": "racoot-security",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0",
+    "dotenv": "^16.0.0"
+  }
+}
+.env
+
+DISCORD_TOKEN=your_new_reset_token_here
+index.js
+
+require('dotenv').config();
+const { Client, GatewayIntentBits, Partials, PermissionFlagsBits, EmbedBuilder, Collection } = require('discord.js');
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildModeration,
+  ],
+  partials: [Partials.Message, Partials.Channel],
+});
+
+// ─── In-memory stores ───────────────────────────────────────────────
+const spamMap = new Map();      // userId -> { count, timer }
+const raidMap = new Map();      // guildId -> { joins, timer }
+const warnMap = new Map();      // userId -> warnCount
+const BANNED_WORDS = ['badword1', 'badword2']; // customize these
+const SPAM_LIMIT = 5;           // messages per 5s
+const RAID_LIMIT = 10;          // joins per 10s
+const MAX_MENTIONS = 5;
+
+// ─── Ready ──────────────────────────────────────────────────────────
+client.once('ready', () => {
+  console.log(`✅ Racoot Security is online as ${client.user.tag}`);
+  client.user.setActivity('🛡 Protecting servers', { type: 3 });
+});
+
+// ─── Anti-Spam + Auto-Mod ───────────────────────────────────────────
+client.on('messageCreate', async (message) => {
+  if (message.author.bot || !message.guild) return;
+
+  const member = message.member;
+  if (member?.permissions.has(PermissionFlagsBits.ManageMessages)) return;
+
+  const userId = message.author.id;
+  const content = message.content.toLowerCase();
+
+  // Banned words
+  if (BANNED_WORDS.some(w => content.includes(w))) {
+    await message.delete().catch(() => {});
+    return message.channel.send(`⚠️ ${message.author}, that word is not allowed here.`).then(m => setTimeout(() => m.delete().catch(() => {}), 5000));
+  }
+
+  // Mass mentions
+  if (message.mentions.users.size >= MAX_MENTIONS) {
+    await message.delete().catch(() => {});
+    await punish(member, message.channel, 'Mass mention');
+    return;
+  }
+
+  // Spam detection
+  const now = Date.now();
+  const userData = spamMap.get(userId) || { count: 0, timer: null };
+  userData.count++;
+  if (userData.timer) clearTimeout(userData.timer);
+  userData.timer = setTimeout(() => spamMap.delete(userId), 5000);
+  spamMap.set(userId, userData);
+
+  if (userData.count >= SPAM_LIMIT) {
+    spamMap.delete(userId);
+    await message.channel.bulkDelete(
+      (await message.channel.messages.fetch({ limit: 10 })).filter(m => m.author.id === userId)
+    ).catch(() => {});
+    await punish(member, message.channel, 'Spam');
+  }
+});
+
+// ─── Anti-Raid ──────────────────────────────────────────────────────
+client.on('guildMemberAdd', async (member) => {
+  const guildId = member.guild.id;
+  const data = raidMap.get(guildId) || { joins: 0, timer: null };
+  data.joins++;
+  if (data.timer) clearTimeout(data.timer);
+  data.timer = setTimeout(() => raidMap.delete(guildId), 10000);
+  raidMap.set(guildId, data);
+
+  if (data.joins >= RAID_LIMIT) {
+    raidMap.delete(guildId);
+    // Kick new member & alert
+    await member.kick('Raid protection').catch(() => {});
+    const logChannel = member.guild.channels.cache.find(c => c.name === 'security-logs' || c.name === 'mod-log');
+    if (logChannel) {
+      const embed = new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle('🚨 RAID DETECTED')
+        .setDescription(`Mass join detected! ${data.joins} members joined in 10 seconds.\n${member.user.tag} was kicked.`)
+        .setTimestamp();
+      logChannel.send({ embeds: [embed] });
+    }
+  }
+});
+
+// ─── Punishment helper ───────────────────────────────────────────────
+async function punish(member, channel, reason) {
+  const userId = member.user.id;
+  const warns = (warnMap.get(userId) || 0) + 1;
+  warnMap.set(userId, warns);
+
+  if (warns >= 3) {
+    await member.ban({ reason: `Racoot Security: ${reason} (3 warnings)` }).catch(() => {});
+    channel.send(`🔨 ${member.user.tag} has been **banned** for repeated violations.`).then(m => setTimeout(() => m.delete().catch(() => {}), 6000));
+    warnMap.delete(userId);
+  } else if (warns >= 2) {
+    await member.kick(`Racoot Security: ${reason}`).catch(() => {});
+    channel.send(`👢 ${member.user.tag} has been **kicked** (Warning ${warns}/3).`).then(m => setTimeout(() => m.delete().catch(() => {}), 6000));
+  } else {
+    // Timeout 5 minutes
+    await member.timeout(5 * 60 * 1000, `Racoot Security: ${reason}`).catch(() => {});
+    channel.send(`⏱ ${member.user.tag} has been **timed out** for 5 minutes (Warning ${warns}/3).`).then(m => setTimeout(() => m.delete().catch(() => {}), 6000));
+  }
+}
+
+// ─── Slash Commands ─────────────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  const { commandName, options, member, guild } = interaction;
+
+  if (!member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
+    return interaction.reply({ content: '❌ You lack permission.', ephemeral: true });
+  }
+
+  if (commandName === 'warn') {
+    const target = options.getMember('user');
+    const reason = options.getString('reason') || 'No reason';
+    const warns = (warnMap.get(target.id) || 0) + 1;
+    warnMap.set(target.id, warns);
+    interaction.reply({ content: `⚠️ ${target.user.tag} warned. (${warns} total) — ${reason}` });
+
+  } else if (commandName === 'kick') {
+    const target = options.getMember('user');
+    const reason = options.getString('reason') || 'No reason';
+    await target.kick(reason);
+    interaction.reply({ content: `👢 ${target.user.tag} has been kicked. Reason: ${reason}` });
+
+  } else if (commandName === 'ban') {
+    const target = options.getMember('user');
+    const reason = options.getString('reason') || 'No reason';
+    await target.ban({ reason });
+    interaction.reply({ content: `🔨 ${target.user.tag} has been banned. Reason: ${reason}` });
+
+  } else if (commandName === 'mute') {
+    const target = options.getMember('user');
+    const minutes = options.getInteger('minutes') || 10;
+    await target.timeout(minutes * 60 * 1000, 'Muted by moderator');
+    interaction.reply({ content: `🔇 ${target.user.tag} muted for ${minutes} minutes.` });
+
+  } else if (commandName === 'stats') {
+    const embed = new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle('🛡 Racoot Security Stats')
+      .addFields(
+        { name: 'Guild', value: guild.name, inline: true },
+        { name: 'Members', value: `${guild.memberCount}`, inline: true },
+        { name: 'Bot Latency', value: `${client.ws.ping}ms`, inline: true },
+      )
+      .setTimestamp();
+    interaction.reply({ embeds: [embed] });
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);
+register-commands.js (run once to register slash commands)
+
+require('dotenv').config();
+const { REST, Routes, ApplicationCommandOptionType } = require('discord.js');
+
+const commands = [
+  {
+    name: 'warn', description: 'Warn a user',
+    options: [
+      { name: 'user', description: 'User to warn', type: 6, required: true },
+      { name: 'reason', description: 'Reason', type: 3 }
+    ]
+  },
+  {
+    name: 'kick', description: 'Kick a user',
+    options: [
+      { name: 'user', description: 'User to kick', type: 6, required: true },
+      { name: 'reason', description: 'Reason', type: 3 }
+    ]
+  },
+  {
+    name: 'ban', description: 'Ban a user',
+    options: [
+      { name: 'user', description: 'User to ban', type: 6, required: true },
+      { name: 'reason', description: 'Reason', type: 3 }
+    ]
+  },
+  {
+    name: 'mute', description: 'Timeout a user',
+    options: [
+      { name: 'user', description: 'User to mute', type: 6, required: true },
+      { name: 'minutes', description: 'Duration in minutes', type: 4 }
+    ]
+  },
+  { name: 'stats', description: 'Show bot and server stats' }
+];
+
+const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+rest.put(Routes.applicationCommands('742118218402889839'), { body: commands })
+  .then(() => console.log('✅ Slash commands registered!'))
+  .catch(console.error);

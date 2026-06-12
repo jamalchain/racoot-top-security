@@ -345,6 +345,9 @@ async function punish(member, channel, reason) {
 // ─── Slash Commands ─────────────────────────────────────────────────
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+  if (!interaction.inGuild() || !interaction.member) {
+    return interaction.reply({ content: '❌ This command can only be used inside a server.', ephemeral: true });
+  }
   const { commandName, options, member, guild } = interaction;
 
   // /getconfig and /setlogs /setpunishment require ManageGuild
